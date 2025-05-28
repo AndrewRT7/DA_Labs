@@ -1,0 +1,127 @@
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(stargazer)
+library(lmtest)
+library(car)
+library(GGally)
+
+
+# Завантаження даних
+movies_initial <- read_csv("TMDB_movie_dataset_v11.csv")
+
+# Таблиці з ID некоректних значень
+budget_to_na <- c(1381066, 1235037, 1057999, 1022208, 
+                  1201764, 1399448, 1426913, 1449031, 1320160, 
+                  1453767, 1453985, 1414861, 1398923, 1365277,
+                  1417006, 1441191, 1450893, 1450893, 1301115, 1228885,
+                  1272552, 1229118, 1294480, 622311, 1369796, 1108211)
+runtime_to_na <- c(206026, 368247, 717019, 392372, 454409, 500980,
+                   544686, 732330, 66871, 633832, 671214, 531640, 535892,
+                   523167, 631038, 698754, 685310, 651033, 125120, 298752)
+
+
+movies_cleaned <- movies_initial %>%
+  # Очистка числових колонок
+  mutate(
+    vote_average = if_else(vote_average <= 0, NA_real_, vote_average),
+    vote_count   = if_else(vote_count <= 0, NA_integer_, vote_count),
+    runtime      = if_else(runtime <= 0, NA_real_, runtime),
+    budget       = if_else(budget < 10, NA_real_, budget)
+  ) %>%
+  # Обробка дати
+  mutate(
+    release_date = gsub('"', '', release_date),
+    release_date = gsub("\\s+", "", release_date),
+    release_date = as.Date(release_date),
+    release_year = year(release_date),
+    release_month = month(release_date, label = TRUE, abbr = TRUE)
+  ) %>%
+  # Створення сезонної змінної
+  mutate(
+    season = case_when(
+      release_month %in% c("Січ", "Лют", "Бер") ~ "Зима",
+      release_month %in% c("Кві", "Тра", "Чер") ~ "Весна",
+      release_month %in% c("Лип", "Сер", "Вер") ~ "Літо",
+      release_month %in% c("Жов", "Лис", "Гру") ~ "Осінь",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  # Виправлення вручну
+  mutate(
+    budget  = if_else(id %in% budget_to_na, NA_real_, budget),
+    runtime = if_else(id %in% runtime_to_na, NA_real_, runtime)
+  ) %>%
+  mutate(
+    season = factor(season),
+    budget = log(budget), 
+    release_decade_bin = ifelse(release_year <= 2010, 0, 1)
+  ) %>%
+  # Видалення усіх NA з основних змінних
+  drop_na(vote_average, runtime, season, budget, vote_count, release_decade_bin) 
+
+  
+  
+nrow(movies_cleaned)
+  
+
+# Базова модель
+model_base <- lm(vote_average ~ runtime + season, data = movies_cleaned)
+
+# Робастні стандартні похибки (HC1)
+model_base_hc1 <- coeftest(model_base, vcov. = hccm(model_base, type = "hc1"))
+stargazer(model_base,
+          type = "text", 
+          se = list(model_base_hc1[, 2]), 
+          omit.stat = c("rsq", "f", "ser"),
+          digits = 3)
+
+
+
+# Модель з контрольними змінними
+model_control <- lm(vote_average ~ runtime + season + budget + vote_count +release_decade_bin, data = movies_cleaned)
+model_control_hc1 <- coeftest(model_control, vcov. = hccm(model_control, type = "hc1"))
+stargazer(model_control,
+          type = "text", 
+          se = list(model_control_hc1[, 2]), 
+          omit.stat = c("rsq", "f", "ser"),
+          digits = 3)
+
+
+
+# Модель з квадратом та кубом runtime
+movies_cleaned$runtime2 <- movies_cleaned$runtime^2
+
+model_poly <- lm(vote_average ~ runtime + runtime2 + season + budget + vote_count, data = movies_cleaned)
+model_poly_hc1 <- coeftest(model_poly, vcov. = hccm(model_poly, type = "hc1"))
+stargazer(model_poly,
+          type = "text", 
+          se = list(model_poly_hc1[, 2]),
+          omit.stat = c("rsq", "f", "ser"),
+          digits = 3)
+
+
+stargazer(model_base, model_control, model_poly, 
+          column.labels = c("Базова", "Контрольні змінні", "Десятиліття"),
+          se = list(model_base_hc1[, 2], model_control_hc1[, 2], model_poly_hc1[, 2]),
+          omit.stat = c("rsq", "f", "ser"),
+          digits = 3)
+
+
+# Парні графіки (scatter matrix) — для числових змінних
+library(GGally)
+GGally::ggpairs(movies_cleaned[, c("vote_average", "budget", "runtime", "vote_count")])
+
+
+#Візуалізація нелінійності (наприклад, квадрат):
+ggplot(movies_cleaned, aes(x = runtime, y = vote_average)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 3), color = "darkred") +
+  labs(title = "Нелінійний зв’язок між тривалістю і рейтингом", x = "Тривалість", y = "Середній рейтинг") +
+  theme_minimal()
+
+
+
